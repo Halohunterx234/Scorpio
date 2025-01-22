@@ -1,6 +1,6 @@
 
 use std::{
-    collections::HashMap, default, env, io::Error as IoError, net::SocketAddr, sync::{Arc, Mutex}
+    collections::HashMap, default, env, io::Error as IoError, net::SocketAddr, str::FromStr, sync::{Arc, Mutex}
 };
 use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
@@ -20,6 +20,7 @@ use tokio_tungstenite::tungstenite::{
 type UUID = i32;
 
 //Contains the addresses of a chat (either pm/group)
+#[derive(Debug)]
 pub struct Client {
     pub sender_addr: Option<SocketAddr>,
     pub sender: Option<Tx>,
@@ -96,27 +97,43 @@ async fn handle_connection(convo_map: ConvoMap, client_maps: PeerMap, raw_stream
     // we iterate through all other addresses and send the message through their tx
     let mut receiving_port: bool = false;
     let broadcast_incoming = stream.try_for_each(|msg| {
-        println!("Received a message from {}: {}", addr, msg.to_text().unwrap());
         let peers = client_maps.lock().unwrap();
         let mut convos = convo_map.lock().unwrap();
-        let current_client = peers.get(&&addr).unwrap();
+        let current_client = peers.get(&addr).unwrap();
         let tx = current_client.sender.as_ref().unwrap();
-
+        
+        //commands (--text) comes with non-text data that we need to clean
+        let msg_2 = msg.clone();
+        let mut binding = msg_2.to_text().unwrap();
+        let is_command = binding.chars();
+        let chars: Vec<char> = is_command.collect();
+        if chars[0] == '-' && chars[1] == '-' {
+            let cleaned: &str = binding.trim();
+            binding = cleaned;
+            println!("Received a message from {}: {}", addr, cleaned);
+        }
 
         if receiving_port {
             if let Ok(current_addr) = msg.clone().to_text(){
                 let mut receiver_addr: Vec<SocketAddr> = vec![];
                 for addr in current_addr.split(" ").into_iter() {
                     println!("split addr: {}", addr);
-                    if let Ok(new_addr) = addr.parse::<SocketAddr>() {
+                    let addr = addr.trim();
+                    if let Ok(new_addr) = SocketAddr::from_str(addr) {
+                        println!("adding new ip: {}", new_addr);
                         receiver_addr.push(new_addr);
                     }
                 }
                 if !receiver_addr.is_empty() {
+                    //add original sender inside
+                    receiver_addr.push(addr);
+                    
+                    println!("connecting new receivers");
                     //get all the tx
                     let mut to_be_clients = HashMap::<SocketAddr, Tx>::new();
                     for receiver in receiver_addr.iter() {
                         if let Some(received) = peers.get(receiver) {
+                            println!("inserting ip {} into convo", receiver);
                             to_be_clients.insert(*receiver, received.sender.as_ref().unwrap().clone());
                         }
                     }
@@ -127,31 +144,37 @@ async fn handle_connection(convo_map: ConvoMap, client_maps: PeerMap, raw_stream
                         clients: to_be_clients,
                     };
                     //add
+                    println!("adding new convo: {:?}", new_convo);
                     convos.push(new_convo);
                 }
             }
+
             receiving_port = false;
         }
         else {
-            match msg.clone().to_text() {
-                Ok("--list") => {
-                    print!("listing");
-                    tx.unbounded_send(Message::Text(
-                        format!("Current Conversations YOU ({}) are in", &addr).into())).unwrap();
+            match binding {
+                "--list" => {
+                    println!("listing");
+                    let intro = Message::Text(format!("Current Conversations YOU ({}) are in:", &addr).into());
+                    tx.unbounded_send(intro).unwrap();
                     if let Some(client_conversations) = get_conversations_uuid(addr, &convos) {
                         for id in client_conversations.iter() {
                             for convo in convos.iter() {
                                 if &convo.id == id {
-                                    tx.unbounded_send(Message::Text(format!("{:?}", convo).into())).unwrap();
+                                    let convo_msg = Message::Text(format!("{:?}", convo).into());
+                                    tx.unbounded_send(convo_msg).unwrap();
                                 }
                             }
                         }
                     }
                     tx.unbounded_send(Message::Text("End".into())).unwrap();
                 },
-                Ok("--connect") => {
+                "--connect" => {
+                    println!("connecting");
                     receiving_port = true;
-                    tx.unbounded_send(Message::Text("Please enter the full ip-addresses, split multiple with whitespace.".into())).unwrap();
+                    let connect_prompt = Message::Text("Please enter the full ip-addresses, split multiple with whitespace.".into());
+                    tx.unbounded_send(connect_prompt).unwrap();
+                    // tx.
                 },
                 _ => {
                     // Broadcast to all clients
@@ -164,7 +187,8 @@ async fn handle_connection(convo_map: ConvoMap, client_maps: PeerMap, raw_stream
                     //         client_tx.unbounded_send(msg.clone()).unwrap();
                     //     }
                     // }
-                    // println!("{}", &msg.to_text().unwrap());
+                    println!("{}", &msg.to_text().unwrap());
+                    // tx.unbounded_send(msg).unwrap();
                 }
             };
         }

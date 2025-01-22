@@ -19,8 +19,11 @@ async fn main() {
     let stdin_to_ws = stdin_rx.map(Ok).forward(ws_sink);
     let ws_to_stdout = {
         ws_stream.for_each(|message| async {
-            let data = message.unwrap().into_data();
-            tokio::io::stdout().write_all(&data).await.unwrap();
+            let m = message.unwrap().clone();
+            let data = m.clone().into_data();
+            println!("msg: {:?}", m.to_text());
+            // tokio::io::stdout().write_all(&data).await.unwrap();
+            // tokio::io::stdout().flush().await.unwrap();
         })
     };
 
